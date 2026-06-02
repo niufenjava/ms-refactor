@@ -2,7 +2,7 @@
 ms-refactor 重构引擎
 
 分析 Python 代码并生成风格重构建议。
-交互式流程：列出文件 -> 选择 -> 分析 -> 确认应用 -> 继续
+自动流程：选择文件 -> 新建分支 -> 分析应用 -> 重试 -> 报告
 """
 
 import argparse
@@ -324,6 +324,33 @@ def auto_refactor_with_retry(target: Path, selected_files: list[Path]) -> dict:
     }
 
 
+def print_summary(results: dict, branch_name: str):
+    """输出变更摘要。"""
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("📊 变更摘要")
+    logger.info("=" * 60)
+    logger.info(f"🌿 分支: {branch_name}")
+    logger.info(f"处理文件: {results.get('files_processed', 0)}")
+    logger.info(f"应用改动: {results.get('changes_applied', 0)}")
+    if results.get('errors'):
+        logger.info(f"错误数: {len(results['errors'])}")
+    logger.info("=" * 60)
+
+    if results.get('plans'):
+        logger.info("📋 改动文件:")
+        for file_path, plan in results["plans"].items():
+            fp = Path(file_path)
+            rel = fp.name
+            blocks = parse_diff_blocks(plan)
+            logger.info(f"  {rel} | {len(blocks)} 处改动")
+
+    logger.info("")
+    logger.info("💡 合并命令:")
+    logger.info(f"  git checkout main && git merge {branch_name}")
+    logger.info("=" * 60)
+
+
 def find_python_files(target: Path) -> list[Path]:
     """找出目标目录下所有的 .py 文件，排除缓存目录。"""
     if target.is_file():
@@ -338,6 +365,32 @@ def find_python_files(target: Path) -> list[Path]:
         files.append(item)
 
     return sorted(files)
+
+
+def list_and_select_files(target: Path) -> list[Path]:
+    """列出 .py 文件，返回用户选择的多选列表。"""
+    files = find_python_files(target)
+    if not files:
+        logger.warning("未找到 Python 文件")
+        return []
+
+    logger.info("📋 找到 %d 个 Python 文件（支持多选，如 1,3,5 或 1-3 或 all）：\n", len(files))
+    for idx, f in enumerate(files, 1):
+        try:
+            lines = len(f.read_text(errors="ignore").splitlines())
+        except Exception:
+            lines = 0
+        rel_path = f.relative_to(target) if target.is_dir() else f.name
+        logger.info("  [%d] %s (%d 行)", idx, rel_path, lines)
+
+    while True:
+        choice = input("\n选择文件: ").strip()
+        indices = parse_selection(choice, len(files))
+        if choice.lower() == "q":
+            return []
+        if indices:
+            return [files[i] for i in indices]
+        logger.warning("无效输入，请输入如 1,3,5 或 1-3 或 all 或 q")
 
 
 def parse_selection(selection: str, file_count: int) -> list[int]:
@@ -380,38 +433,6 @@ def parse_selection(selection: str, file_count: int) -> list[int]:
                 pass
 
     return sorted(set(indices))
-
-
-def list_python_files(target: Path) -> list[Path]:
-    """列出目标下所有 .py 文件，返回用户选择的文件路径。
-
-    返回空列表表示用户退出。
-    """
-    files = find_python_files(target)
-    if not files:
-        logger.warning("未找到 Python 文件")
-        return []
-
-    logger.info("📋 找到 %d 个 Python 文件：\n", len(files))
-    for idx, f in enumerate(files, 1):
-        try:
-            lines = len(f.read_text(errors="ignore").splitlines())
-        except Exception:
-            lines = 0
-        rel_path = f.relative_to(target) if target.is_dir() else f.name
-        logger.info("  [%d] %s (%d 行)", idx, rel_path, lines)
-
-    while True:
-        choice = input("\n选择文件（q 退出）: ").strip()
-        if choice.lower() == "q":
-            return []
-        try:
-            idx = int(choice)
-            if 1 <= idx <= len(files):
-                return [files[idx - 1]]
-        except ValueError:
-            pass
-        logger.warning("无效输入，请输入 1-%d 或 q", len(files))
 
 
 def compose_llm_prompt(target: Path, file_path: Path) -> str:
@@ -532,47 +553,6 @@ def run_destruction_check(target: Path) -> dict:
     return {"passed": passed, "details": details}
 
 
-def interactive_refactor(target: Path) -> None:
-    """交互式重构流程：列出文件 -> 选择 -> 分析 -> 确认应用。"""
-    while True:
-        files = list_python_files(target)
-        if not files:
-            return
-
-        file_path = files[0]
-        rel_path = file_path.relative_to(target) if target.is_dir() else file_path.name
-
-        logger.info("\n📄 分析: %s", rel_path)
-        plan = analyze_and_plan(target, file_path)
-
-        if plan.startswith("LLM") or plan.startswith("读取"):
-            logger.error(plan)
-            continue
-
-        logger.info("\n=== 重构建议 ===\n%s\n", plan)
-
-        while True:
-            confirm = input("确认应用？[y/n/s(kip)]: ").strip().lower()
-            if confirm in ("y", "n", "s"):
-                break
-            logger.warning("无效输入")
-
-        if confirm == "y":
-            success, failures, errors = execute_plan(target, plan)
-            logger.info("应用结果: 成功 %d, 失败 %d", success, failures)
-            for err in errors:
-                logger.error("  - %s", err)
-        elif confirm == "s":
-            logger.info("跳过该文件")
-
-        if confirm != "n":
-            check = input("是否进行语法检查？[y/n]: ").strip().lower()
-            if check == "y":
-                result = run_destruction_check(target)
-                for d in result["details"]:
-                    logger.info(d)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Python 代码重构引擎")
     parser.add_argument("target", nargs="?", default="", help="目标：文件路径/目录/项目名")
@@ -590,7 +570,27 @@ def main():
         sys.exit(1)
 
     logger.info("📂 目标: %s", target_path)
-    interactive_refactor(target_path)
+
+    selected_files = list_and_select_files(target_path)
+    if not selected_files:
+        logger.info("已退出")
+        sys.exit(0)
+
+    branch_ok, branch_name = create_refactor_branch()
+    if not branch_ok:
+        logger.error("创建分支失败: %s", branch_name)
+        sys.exit(1)
+
+    logger.info("🌿 分支: %s", branch_name)
+
+    result = auto_refactor_with_retry(target_path, selected_files)
+
+    print_summary(result, branch_name)
+
+    if result["success"]:
+        logger.info("✅ 全部通过")
+    else:
+        logger.warning("⚠️ 有失败，请检查后合并")
 
 
 if __name__ == "__main__":
