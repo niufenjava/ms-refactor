@@ -49,6 +49,27 @@ def resolve_target(raw: str) -> Path:
     raise FileNotFoundError(f"目标不存在或无法定位：{raw}")
 
 
+def create_refactor_branch() -> tuple[bool, str]:
+    """创建 refactor/<timestamp> 分支。返回 (success, branch_name)。"""
+    from datetime import datetime
+    branch_name = f"refactor/{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return True, branch_name
+
+    result = subprocess.run(
+        ["git", "checkout", "-b", branch_name],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return False, f"创建分支失败: {result.stderr}"
+    return True, branch_name
+
+
 def search_projects(keyword: str) -> Optional[Path]:
     """在 ~/my-projects/ 下模糊搜索匹配目录。返回第一个匹配或 None。"""
     if not keyword or not MY_PROJECTS.exists():
@@ -323,6 +344,38 @@ def analyze_and_plan(target: Path, file_path: Path) -> str:
     if ok:
         return result
     return f"LLM 分析失败: {result}"
+
+
+def ask_llm_generate_tests(target: Path) -> bool:
+    """询问 LLM 是否需要生成测试。返回 True 表示需要生成。"""
+    try:
+        sys.path.insert(0, str(LLM_CALL_PY.parent))
+        from llm_call import read_prompt, safe_llm_call
+    except Exception:
+        return False
+
+    files = find_python_files(target)
+    files_info = "\n".join([f"- {f.relative_to(target)}" for f in files[:10]])
+
+    prompt = f"""代码目录: {target}
+Python 文件:
+{files_info}
+
+请判断是否需要为这些代码生成单元测试。
+标准：
+- 核心业务逻辑（类、复杂函数）需要测试
+- 简单工具脚本可跳过
+- 函数签名变更必须验证
+
+回答格式：只回答 "yes" 或 "no"，不要解释。"""
+
+    try:
+        system_prompt = read_prompt(str(PROMPT_FILE))
+    except Exception:
+        return False
+
+    ok, result = safe_llm_call(system_prompt, prompt)
+    return "yes" in result.lower() if ok else False
 
 
 def run_destruction_check(target: Path) -> dict:
