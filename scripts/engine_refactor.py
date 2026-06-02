@@ -214,28 +214,13 @@ def apply_code_change(filepath: Path, old_content: str, new_content: str) -> tup
     return False, "未找到匹配内容"
 
 
-def execute_plan(target: Path, plan: str) -> tuple[int, int, list[str]]:
-    """应用 diff 计划。返回 (成功数, 失败数, 错误消息列表)。"""
-    blocks = parse_diff_blocks(plan)
-    success = 0
-    failures = 0
-    errors = []
-
-    for block in blocks:
-        if Path(block["file"]).is_absolute():
-            filepath = Path(block["file"])
-        elif target.is_file():
-            filepath = target.parent / block["file"]
-        else:
-            filepath = target / block["file"]
-        ok, msg = apply_code_change(filepath, block["old"], block["new"])
-        if ok:
-            success += 1
-        else:
-            failures += 1
-            errors.append(f"{block['file']}: {msg}")
-
-    return success, failures, errors
+def apply_new_content(filepath: Path, new_content: str) -> tuple[bool, str]:
+    """直接写入完整新代码。返回 (success, message)。"""
+    try:
+        filepath.write_text(new_content, encoding="utf-8")
+        return True, "已写入新内容"
+    except Exception as e:
+        return False, f"写入失败: {e}"
 
 
 def auto_refactor(target: Path, selected_files: list[Path]) -> dict:
@@ -243,21 +228,27 @@ def auto_refactor(target: Path, selected_files: list[Path]) -> dict:
     results = {
         "files_processed": 0,
         "changes_applied": 0,
-        "plans": {},
+        "new_contents": {},
         "errors": [],
     }
 
     for file_path in selected_files:
-        plan = analyze_and_plan(target, file_path)
-        if plan.startswith("LLM") or plan.startswith("读取"):
-            results["errors"].append(f"{file_path}: {plan}")
+        new_content = analyze_and_plan(target, file_path)
+        if new_content.startswith("LLM") or new_content.startswith("读取") or new_content.startswith("语法"):
+            results["errors"].append(f"{file_path}: {new_content}")
             continue
 
-        results["plans"][str(file_path)] = plan
-        success, failures, errors = execute_plan(target, plan)
-        results["files_processed"] += 1
-        results["changes_applied"] += success
-        results["errors"].extend(errors)
+        if not new_content or len(new_content) < 50:
+            results["errors"].append(f"{file_path}: LLM 返回内容过短，可能是错误")
+            continue
+
+        results["new_contents"][str(file_path)] = new_content
+        ok, msg = apply_new_content(file_path, new_content)
+        if ok:
+            results["files_processed"] += 1
+            results["changes_applied"] += 1
+        else:
+            results["errors"].append(f"{file_path}: {msg}")
 
     return results
 
@@ -315,29 +306,10 @@ MAX_RETRIES = 5
 
 def auto_refactor_with_retry(target: Path, selected_files: list[Path]) -> dict:
     """自动重构 + 5 轮重试。返回最终结果。"""
-    all_plans = {}
-
     for round_num in range(1, MAX_RETRIES + 1):
         logger.info(f"⏳ 第 {round_num} 轮: 分析中...")
 
-        if round_num == 1:
-            results = auto_refactor(target, selected_files)
-            all_plans.update(results["plans"])
-        else:
-            check = run_destruction_check(target)
-            if check["passed"]:
-                logger.info(f"✅ 第 {round_num} 轮: 全部通过")
-                break
-
-            error_summary = "\n".join(check["details"])
-            logger.warning(f"❌ 第 {round_num} 轮: 失败，LLM 修复中...")
-
-            new_plans = llm_fix_and_regenerate(target, selected_files, error_summary)
-
-            for file_path, plan in new_plans.items():
-                fp = Path(file_path)
-                success, failures, errors = execute_plan(target, plan)
-                all_plans[file_path] = plan
+        results = auto_refactor(target, selected_files)
 
         check = run_destruction_check(target)
         if check["passed"]:
@@ -345,15 +317,21 @@ def auto_refactor_with_retry(target: Path, selected_files: list[Path]) -> dict:
             return {
                 "success": True,
                 "rounds": round_num,
-                "plans": all_plans,
                 "results": results,
             }
+
+        if round_num < MAX_RETRIES:
+            logger.warning(f"❌ 第 {round_num} 轮: 有错误，重新分析...")
+            for file_path in selected_files:
+                new_content = analyze_and_plan(target, file_path)
+                if not new_content.startswith("LLM") and not new_content.startswith("读取") and not new_content.startswith("语法") and len(new_content) > 50:
+                    results["new_contents"][str(file_path)] = new_content
+                    apply_new_content(file_path, new_content)
 
     logger.error(f"⚠️ {MAX_RETRIES} 轮重试后仍失败，分支已创建，请手动检查")
     return {
         "success": False,
         "rounds": MAX_RETRIES,
-        "plans": all_plans,
         "results": results,
     }
 
@@ -371,13 +349,12 @@ def print_summary(results: dict, branch_name: str):
         logger.info(f"错误数: {len(results['errors'])}")
     logger.info("=" * 60)
 
-    if results.get('plans'):
+    if results.get('new_contents'):
         logger.info("📋 改动文件:")
-        for file_path, plan in results["plans"].items():
+        for file_path in results["new_contents"].keys():
             fp = Path(file_path)
             rel = fp.name
-            blocks = parse_diff_blocks(plan)
-            logger.info(f"  {rel} | {len(blocks)} 处改动")
+            logger.info(f"  {rel}")
 
     logger.info("")
     logger.info("💡 合并命令:")
