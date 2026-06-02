@@ -1,80 +1,35 @@
-#!/usr/bin/env python3
 """
-engine_refactor.py - 代码风格重构引擎
+ms-refactor 重构引擎
 
-用法：
-  python3 engine_refactor.py analyze "<目标>"    # 分析并生成 diff 清单
-  python3 engine_refactor.py apply "<目标>"      # 执行 diff 清单（需先 analyze）
-  python3 engine_refactor.py exec "<目标>"       # 分析 + 确认后执行
-
-目标：文件路径 / 目录路径 / 项目名（在 ~/my-projects/ 下查找）
-
-输出：markdown 格式改动清单（含 diff），exec 模式确认后执行。
+分析 Python 代码并生成风格重构建议。
+交互式流程：列出文件 -> 选择 -> 分析 -> 确认应用 -> 继续
 """
 
 import argparse
 import ast
-import difflib
+import logging
 import re
 import subprocess
 import sys
-from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-SKILL_DIR = SCRIPT_DIR.parent
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# 跳过扫描的目录
+SKIP_DIRS = {"__pycache__", ".pytest_cache", ".backup", ".git", ".idea", ".vscode"}
+
+# LLM 调用脚本路径
 LLM_CALL_PY = Path.home() / "my-projects" / "claw-scripts" / "llm" / "llm_call.py"
 MY_PROJECTS = Path.home() / "my-projects"
 
-LANG_CONFIG = {
-    "Python": {
-        "exts": {".py"},
-        "comment": "#",
-        "docstring": '"""',
-        "index_cmd": ["find", "{path}", "-type", "f", "-name", "*.py", "-not", "-path", "*/__pycache__/*"],
-        "parser": "ast",
-    },
-    "JavaScript": {
-        "exts": {".js", ".jsx"},
-        "comment": "//",
-        "docstring": "/**",
-        "index_cmd": ["find", "{path}", "-type", "f", "(", "-name", "*.js", "-o", "-name", "*.jsx", ")", "-not", "-path", "*/node_modules/*"],
-        "parser": "regex",
-    },
-    "TypeScript": {
-        "exts": {".ts", ".tsx"},
-        "comment": "//",
-        "docstring": "/**",
-        "index_cmd": ["find", "{path}", "-type", "f", "(", "-name", "*.ts", "-o", "-name", "*.tsx", ")", "-not", "-path", "*/node_modules/*"],
-        "parser": "regex",
-    },
-    "Go": {
-        "exts": {".go"},
-        "comment": "//",
-        "docstring": "//",
-        "index_cmd": ["find", "{path}", "-type", "f", "-name", "*.go"],
-        "parser": "regex",
-    },
-    "Rust": {
-        "exts": {".rs"},
-        "comment": "//",
-        "docstring": "///",
-        "index_cmd": ["find", "{path}", "-type", "f", "-name", "*.rs"],
-        "parser": "regex",
-    },
-    "Shell": {
-        "exts": {".sh", ".bash", ".zsh"},
-        "comment": "#",
-        "docstring": "#",
-        "index_cmd": ["find", "{path}", "-type", "f", "(", "-name", "*.sh", "-o", "-name", "*.bash", "-o", "-name", "*.zsh", ")"],
-        "parser": "regex",
-    },
-}
-
-EXT_TO_LANG = {ext: lang for lang, cfg in LANG_CONFIG.items() for ext in cfg["exts"]}
-
-BINARY_EXTS = {".so", ".dylib", ".a", ".o", ".obj", ".exe", ".dll", ".zip", ".tar", ".gz", ".png", ".jpg", ".jpeg", ".gif", ".pdf"}
+# prompt 文件路径
+PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "re_python.md"
 
 
 def resolve_target(raw: str) -> Path:
