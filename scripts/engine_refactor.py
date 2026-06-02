@@ -166,23 +166,51 @@ def parse_diff_blocks(markdown: str) -> list[dict]:
 
 
 def apply_code_change(filepath: Path, old_content: str, new_content: str) -> tuple[bool, str]:
-    """将 old_content 替换为 new_content，精确到行。返回 (success, message)。"""
+    """将 old_content 替换为 new_content，使用行匹配。返回 (success, message)。"""
     try:
         actual = filepath.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         return False, f"读取文件失败: {e}"
 
-    if old_content not in actual:
-        return False, "原文不在文件中（可能已被修改）"
+    actual_lines = actual.splitlines(keepends=True)
+    old_lines = old_content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
 
-    new_file_content = actual.replace(old_content, new_content, 1)
+    if len(old_lines) == 0 or len(actual_lines) == 0:
+        return False, "空内容无法替换"
 
-    try:
-        filepath.write_text(new_file_content, encoding="utf-8")
-    except Exception as e:
-        return False, f"写入文件失败: {e}"
+    if len(old_lines) == 1:
+        first_line = old_lines[0]
+        for i, line in enumerate(actual_lines):
+            if line == first_line:
+                result_lines = actual_lines[:i] + new_lines + actual_lines[i+1:]
+                new_file_content = "".join(result_lines)
+                try:
+                    filepath.write_text(new_file_content, encoding="utf-8")
+                except Exception as e:
+                    return False, f"写入文件失败: {e}"
+                return True, f"已应用改动"
+        return False, "未找到匹配行"
 
-    return True, "已应用改动"
+    anchor = old_lines[0]
+    for start_pos in range(len(actual_lines)):
+        if actual_lines[start_pos].rstrip() == anchor.rstrip():
+            end_pos = start_pos + len(old_lines)
+            if end_pos <= len(actual_lines):
+                chunk = actual_lines[start_pos:end_pos]
+                from difflib import SequenceMatcher
+                s = SequenceMatcher(None, old_lines, chunk)
+                ratio = s.ratio()
+                if ratio >= 0.5:
+                    result_lines = actual_lines[:start_pos] + new_lines + actual_lines[end_pos:]
+                    new_file_content = "".join(result_lines)
+                    try:
+                        filepath.write_text(new_file_content, encoding="utf-8")
+                    except Exception as e:
+                        return False, f"写入文件失败: {e}"
+                    return True, f"已应用改动（相似度: {ratio:.2%}）"
+
+    return False, "未找到匹配内容"
 
 
 def execute_plan(target: Path, plan: str) -> tuple[int, int, list[str]]:
