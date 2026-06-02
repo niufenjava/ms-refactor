@@ -23,7 +23,7 @@ SKIP_DIRS = {"__pycache__", ".pytest_cache", ".backup", ".git", ".idea", ".vscod
 
 LLM_CALL_PY = Path.home() / "my-projects" / "claw-scripts" / "llm" / "llm_call.py"
 MY_PROJECTS = Path.home() / "my-projects"
-
+MAX_RETRIES = 5
 PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "re_python.md"
 REFACTOR_PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "refactor_prompt.md"
 
@@ -153,8 +153,8 @@ def parse_diff_blocks(markdown: str) -> list[dict]:
             elif line.startswith("+") and not line.startswith("+++"):
                 current_new.append(line[1:])
             elif not line.startswith("+++") and not line.startswith("---") and not line.startswith("@@"):
-                current_old.append(line)
-                current_new.append(line)
+                current_old.append(line[1:])
+                current_new.append(line[1:])
 
     if current_file and (current_old or current_new):
         blocks.append({
@@ -505,15 +505,15 @@ def analyze_and_plan(target: Path, file_path: Path) -> str:
     except Exception as e:
         return f"LLM 调用失败: {e}"
 
-        try:
-            system_prompt = read_prompt(str(REFACTOR_PROMPT_FILE))
-        except Exception as e:
-            return f"读取 prompt 文件失败: {e}"
+    try:
+        system_prompt = read_prompt(str(REFACTOR_PROMPT_FILE))
+    except Exception as e:
+        return f"读取 prompt 文件失败: {e}"
 
-        ok, result = safe_llm_call(system_prompt, user_content)
-        if ok:
-            return result
-        return f"LLM 分析失败: {result}"
+    ok, result = safe_llm_call(system_prompt, user_content)
+    if ok and result:
+        return result
+    return f"LLM 分析失败: {result}"
 
 
 def ask_llm_generate_tests(target: Path) -> bool:
