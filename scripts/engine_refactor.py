@@ -494,8 +494,19 @@ def analyze_and_plan(target: Path, file_path: Path) -> str:
 
     ok, result = safe_llm_call(system_prompt, user_content)
     if ok and result:
-        return result
+        return extract_code_from_markdown(result)
     return f"LLM 分析失败: {result}"
+
+
+def extract_code_from_markdown(content: str) -> str:
+    """从 markdown 中提取 Python 代码块。"""
+    import re
+    # 匹配 ```python ... ``` 块
+    match = re.search(r"```python\s*(.*?)\s*```", content, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # 如果没有找到 python 标记，返回原文
+    return content
 
 
 def ask_llm_generate_tests(target: Path) -> bool:
