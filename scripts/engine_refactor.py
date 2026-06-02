@@ -2,7 +2,7 @@
 ms-refactor 重构引擎
 
 分析 Python 代码并生成风格重构建议。
-自动流程：选择文件 -> 新建分支 -> 分析应用 -> 重试 -> 报告
+流程：选择文件 -> 分析 -> 保存建议 -> 用户决定
 """
 
 import argparse
@@ -23,13 +23,12 @@ SKIP_DIRS = {"__pycache__", ".pytest_cache", ".backup", ".git", ".idea", ".vscod
 
 LLM_CALL_PY = Path.home() / "my-projects" / "claw-scripts" / "llm" / "llm_call.py"
 MY_PROJECTS = Path.home() / "my-projects"
-MAX_RETRIES = 5
 PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "re_python.md"
 REFACTOR_PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "refactor_prompt.md"
 
 
 def resolve_target(raw: str) -> Path:
-    """将字符串解析为真实文件路径。支持模糊搜索项目目录。"""
+    """将字符串解析为真实文件路径。"""
     raw = raw.strip().strip('"').strip("'")
     p = Path(raw)
     if p.exists():
@@ -50,29 +49,8 @@ def resolve_target(raw: str) -> Path:
     raise FileNotFoundError(f"目标不存在或无法定位：{raw}")
 
 
-def create_refactor_branch() -> tuple[bool, str]:
-    """创建 refactor/<timestamp> 分支。返回 (success, branch_name)。"""
-    from datetime import datetime
-    branch_name = f"refactor/{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return True, branch_name
-
-    result = subprocess.run(
-        ["git", "checkout", "-b", branch_name],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return False, f"创建分支失败: {result.stderr}"
-    return True, branch_name
-
-
 def search_projects(keyword: str) -> Optional[Path]:
-    """在 ~/my-projects/ 下模糊搜索匹配目录。返回第一个匹配或 None。"""
+    """在 ~/my-projects/ 下模糊搜索匹配目录。"""
     if not keyword or not MY_PROJECTS.exists():
         return None
     keyword_lower = keyword.lower()
@@ -96,12 +74,12 @@ def is_binary(path: Path) -> bool:
 
 
 def extract_python_symbols(content: str, filepath: str) -> list[dict]:
-    """用 ast 解析 Python 代码结构，返回函数和类列表。"""
+    """用 ast 解析 Python 代码结构。"""
     items = []
     try:
         tree = ast.parse(content, filename=filepath)
     except SyntaxError as e:
-        return [{"type": "error", "name": f"ParseError: {e}", "line": 0, "col": 0}]
+        return [{"type": "error", "name": f"ParseError: {e}", "line": 0}]
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -109,261 +87,18 @@ def extract_python_symbols(content: str, filepath: str) -> list[dict]:
                 "type": "function",
                 "name": node.name,
                 "line": node.lineno,
-                "col": node.col_offset,
-                "end_line": getattr(node, "end_lineno", node.lineno),
             })
         elif isinstance(node, ast.ClassDef):
             items.append({
                 "type": "class",
                 "name": node.name,
                 "line": node.lineno,
-                "col": node.col_offset,
-                "end_line": getattr(node, "end_lineno", node.lineno),
             })
     return items
 
 
-def parse_diff_blocks(markdown: str) -> list[dict]:
-    """解析 markdown 中的 diff 块，返回 [{filepath, old_content, new_content}]。"""
-    blocks = []
-    current_file = None
-    current_old = []
-    current_new = []
-    in_diff = False
-
-    for line in markdown.split("\n"):
-        if line.startswith("### File:"):
-            if current_file and (current_old or current_new):
-                blocks.append({
-                    "file": current_file,
-                    "old": "\n".join(current_old),
-                    "new": "\n".join(current_new),
-                })
-            current_file = line.replace("### File:", "").strip()
-            current_old = []
-            current_new = []
-            in_diff = False
-        elif line.strip() == "```diff":
-            in_diff = True
-        elif line.strip() == "```" and in_diff:
-            in_diff = False
-        elif in_diff:
-            if line.startswith("-") and not line.startswith("---"):
-                current_old.append(line[1:])
-            elif line.startswith("+") and not line.startswith("+++"):
-                current_new.append(line[1:])
-            elif not line.startswith("+++") and not line.startswith("---") and not line.startswith("@@"):
-                current_old.append(line[1:])
-                current_new.append(line[1:])
-
-    if current_file and (current_old or current_new):
-        blocks.append({
-            "file": current_file,
-            "old": "\n".join(current_old),
-            "new": "\n".join(current_new),
-        })
-
-    return blocks
-
-
-def apply_code_change(filepath: Path, old_content: str, new_content: str) -> tuple[bool, str]:
-    """将 old_content 替换为 new_content，使用行匹配。返回 (success, message)。"""
-    try:
-        actual = filepath.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return False, f"读取文件失败: {e}"
-
-    actual_lines = actual.splitlines(keepends=True)
-    old_lines = old_content.splitlines(keepends=True)
-    new_lines = new_content.splitlines(keepends=True)
-
-    if len(old_lines) == 0 or len(actual_lines) == 0:
-        return False, "空内容无法替换"
-
-    if len(old_lines) == 1:
-        first_line = old_lines[0]
-        for i, line in enumerate(actual_lines):
-            if line == first_line:
-                result_lines = actual_lines[:i] + new_lines + actual_lines[i+1:]
-                new_file_content = "".join(result_lines)
-                try:
-                    filepath.write_text(new_file_content, encoding="utf-8")
-                except Exception as e:
-                    return False, f"写入文件失败: {e}"
-                return True, f"已应用改动"
-        return False, "未找到匹配行"
-
-    anchor = old_lines[0]
-    for start_pos in range(len(actual_lines)):
-        if actual_lines[start_pos].rstrip() == anchor.rstrip():
-            end_pos = start_pos + len(old_lines)
-            if end_pos <= len(actual_lines):
-                chunk = actual_lines[start_pos:end_pos]
-                from difflib import SequenceMatcher
-                s = SequenceMatcher(None, old_lines, chunk)
-                ratio = s.ratio()
-                if ratio >= 0.5:
-                    result_lines = actual_lines[:start_pos] + new_lines + actual_lines[end_pos:]
-                    new_file_content = "".join(result_lines)
-                    try:
-                        filepath.write_text(new_file_content, encoding="utf-8")
-                    except Exception as e:
-                        return False, f"写入文件失败: {e}"
-                    return True, f"已应用改动（相似度: {ratio:.2%}）"
-
-    return False, "未找到匹配内容"
-
-
-def apply_new_content(filepath: Path, new_content: str) -> tuple[bool, str]:
-    """直接写入完整新代码。返回 (success, message)。"""
-    try:
-        filepath.write_text(new_content, encoding="utf-8")
-        return True, "已写入新内容"
-    except Exception as e:
-        return False, f"写入失败: {e}"
-
-
-def auto_refactor(target: Path, selected_files: list[Path]) -> dict:
-    """自动分析并应用所有选定文件的重构。"""
-    results = {
-        "files_processed": 0,
-        "changes_applied": 0,
-        "new_contents": {},
-        "errors": [],
-    }
-
-    for file_path in selected_files:
-        new_content = analyze_and_plan(target, file_path)
-        if new_content.startswith("LLM") or new_content.startswith("读取") or new_content.startswith("语法"):
-            results["errors"].append(f"{file_path}: {new_content}")
-            continue
-
-        if not new_content or len(new_content) < 50:
-            results["errors"].append(f"{file_path}: LLM 返回内容过短，可能是错误")
-            continue
-
-        results["new_contents"][str(file_path)] = new_content
-        ok, msg = apply_new_content(file_path, new_content)
-        if ok:
-            results["files_processed"] += 1
-            results["changes_applied"] += 1
-        else:
-            results["errors"].append(f"{file_path}: {msg}")
-
-    return results
-
-
-def llm_fix_and_regenerate(target: Path, selected_files: list[Path], error_summary: str) -> dict:
-    """根据错误信息让 LLM 修复并重新生成 diff。"""
-    plans = {}
-
-    for file_path in selected_files:
-        rel_path = file_path.relative_to(target) if target.is_dir() else file_path.name
-
-        try:
-            content = file_path.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
-            continue
-
-        prompt = f"""文件: {rel_path}
-内容:
-```
-{content[:8000]}
-```
-
-上次重构有错误：
-{error_summary}
-
-请根据错误信息修复这个文件，生成新的重构 diff。
-输出格式：
-### File: <相对路径>
-
-```diff
-- 原代码
-+ 改动后代码
-```
-"""
-
-        try:
-            sys.path.insert(0, str(LLM_CALL_PY.parent))
-            from llm_call import read_prompt, safe_llm_call
-        except Exception:
-            continue
-
-        try:
-            system_prompt = read_prompt(str(REFACTOR_PROMPT_FILE))
-        except Exception:
-            continue
-
-        ok, result = safe_llm_call(system_prompt, prompt)
-        if ok:
-            plans[str(file_path)] = result
-
-    return plans
-
-
-MAX_RETRIES = 5
-
-def auto_refactor_with_retry(target: Path, selected_files: list[Path]) -> dict:
-    """自动重构 + 5 轮重试。返回最终结果。"""
-    for round_num in range(1, MAX_RETRIES + 1):
-        logger.info(f"⏳ 第 {round_num} 轮: 分析中...")
-
-        results = auto_refactor(target, selected_files)
-
-        check = run_destruction_check(target)
-        if check["passed"]:
-            logger.info(f"✅ 第 {round_num} 轮: 全部通过")
-            return {
-                "success": True,
-                "rounds": round_num,
-                "results": results,
-            }
-
-        if round_num < MAX_RETRIES:
-            logger.warning(f"❌ 第 {round_num} 轮: 有错误，重新分析...")
-            for file_path in selected_files:
-                new_content = analyze_and_plan(target, file_path)
-                if not new_content.startswith("LLM") and not new_content.startswith("读取") and not new_content.startswith("语法") and len(new_content) > 50:
-                    results["new_contents"][str(file_path)] = new_content
-                    apply_new_content(file_path, new_content)
-
-    logger.error(f"⚠️ {MAX_RETRIES} 轮重试后仍失败，分支已创建，请手动检查")
-    return {
-        "success": False,
-        "rounds": MAX_RETRIES,
-        "results": results,
-    }
-
-
-def print_summary(results: dict, branch_name: str):
-    """输出变更摘要。"""
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("📊 变更摘要")
-    logger.info("=" * 60)
-    logger.info(f"🌿 分支: {branch_name}")
-    logger.info(f"处理文件: {results.get('files_processed', 0)}")
-    logger.info(f"应用改动: {results.get('changes_applied', 0)}")
-    if results.get('errors'):
-        logger.info(f"错误数: {len(results['errors'])}")
-    logger.info("=" * 60)
-
-    if results.get('new_contents'):
-        logger.info("📋 改动文件:")
-        for file_path in results["new_contents"].keys():
-            fp = Path(file_path)
-            rel = fp.name
-            logger.info(f"  {rel}")
-
-    logger.info("")
-    logger.info("💡 合并命令:")
-    logger.info(f"  git checkout main && git merge {branch_name}")
-    logger.info("=" * 60)
-
-
 def find_python_files(target: Path) -> list[Path]:
-    """找出目标目录下所有的 .py 文件，排除缓存目录。"""
+    """找出目标目录下所有的 .py 文件。"""
     if target.is_file():
         return [target] if target.suffix == ".py" else []
 
@@ -405,14 +140,7 @@ def list_and_select_files(target: Path) -> list[Path]:
 
 
 def parse_selection(selection: str, file_count: int) -> list[int]:
-    """解析用户输入的选择，返回文件索引列表（0-based）。
-
-    支持格式：
-    - "1,3,5" -> [0, 2, 4]
-    - "1-3" -> [0, 1, 2]
-    - "all" -> [0, 1, ..., file_count-1]
-    - "q" -> []
-    """
+    """解析用户输入的选择，返回文件索引列表（0-based）。"""
     selection = selection.strip().lower()
     if selection == "q":
         return []
@@ -420,12 +148,10 @@ def parse_selection(selection: str, file_count: int) -> list[int]:
         return list(range(file_count))
 
     indices = []
-    # 逗号分隔
     for part in selection.split(","):
         part = part.strip()
         if not part:
             continue
-        # 范围 (如 1-3)
         if "-" in part:
             start, end = part.split("-", 1)
             try:
@@ -435,7 +161,6 @@ def parse_selection(selection: str, file_count: int) -> list[int]:
             except ValueError:
                 pass
         else:
-            # 单个数字
             try:
                 idx = int(part) - 1
                 if 0 <= idx < file_count:
@@ -478,7 +203,7 @@ def compose_llm_prompt(target: Path, file_path: Path) -> str:
 
 
 def analyze_and_plan(target: Path, file_path: Path) -> str:
-    """调用 LLM 生成单个文件的重构计划。"""
+    """调用 LLM 生成单个文件的重构建议（完整新代码）。"""
     user_content = compose_llm_prompt(target, file_path)
 
     try:
@@ -501,78 +226,17 @@ def analyze_and_plan(target: Path, file_path: Path) -> str:
 def extract_code_from_markdown(content: str) -> str:
     """从 markdown 中提取 Python 代码块。"""
     import re
-    # 匹配 ```python ... ``` 块
     match = re.search(r"```python\s*(.*?)\s*```", content, re.DOTALL)
     if match:
         return match.group(1).strip()
-    # 如果没有找到 python 标记，返回原文
     return content
 
 
-def ask_llm_generate_tests(target: Path) -> bool:
-    """询问 LLM 是否需要生成测试。返回 True 表示需要生成。"""
-    try:
-        sys.path.insert(0, str(LLM_CALL_PY.parent))
-        from llm_call import read_prompt, safe_llm_call
-    except Exception:
-        return False
-
-    files = find_python_files(target)
-    files_info = "\n".join([f"- {f.relative_to(target)}" for f in files[:10]])
-
-    prompt = f"""代码目录: {target}
-Python 文件:
-{files_info}
-
-请判断是否需要为这些代码生成单元测试。
-标准：
-- 核心业务逻辑（类、复杂函数）需要测试
-- 简单工具脚本可跳过
-- 函数签名变更必须验证
-
-回答格式：只回答 "yes" 或 "no"，不要解释。"""
-
-    try:
-        system_prompt = read_prompt(str(PROMPT_FILE))
-    except Exception:
-        return False
-
-    ok, result = safe_llm_call(system_prompt, prompt)
-    return "yes" in result.lower() if ok else False
-
-
-def run_destruction_check(target: Path) -> dict:
-    """语法检查 + 测试运行。返回 {passed: bool, details: list[str]}。"""
-    details = []
-    passed = True
-
-    files = find_python_files(target)
-    for f in files:
-        result = subprocess.run(
-            ["python3", "-m", "py_compile", str(f)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            passed = False
-            details.append(f"语法错误: {f.relative_to(target)} - {result.stderr.strip()}")
-        else:
-            details.append(f"✅ 语法OK: {f.relative_to(target)}")
-
-    test_dir = target / "tests"
-    if test_dir.exists():
-        pytest_result = subprocess.run(
-            ["python3", "-m", "pytest", str(test_dir), "-v", "--tb=short"],
-            capture_output=True, text=True, cwd=str(target),
-        )
-        if pytest_result.returncode == 0:
-            details.append(f"✅ 测试通过")
-        elif pytest_result.returncode == 5:
-            details.append("⚠️ 无测试文件")
-        else:
-            passed = False
-            details.append(f"❌ 测试失败")
-
-    return {"passed": passed, "details": details}
+def save_refactored_code(original_path: Path, new_content: str) -> Path:
+    """保存重构后的代码到 .refactored.py 文件。"""
+    refactored_path = original_path.parent / f"{original_path.stem}.refactored.py"
+    refactored_path.write_text(new_content, encoding="utf-8")
+    return refactored_path
 
 
 def main():
@@ -598,21 +262,45 @@ def main():
         logger.info("已退出")
         sys.exit(0)
 
-    branch_ok, branch_name = create_refactor_branch()
-    if not branch_ok:
-        logger.error("创建分支失败: %s", branch_name)
-        sys.exit(1)
+    results = []
+    for file_path in selected_files:
+        rel_path = file_path.relative_to(target_path) if target_path.is_dir() else file_path.name
+        logger.info("\n📄 分析: %s", rel_path)
 
-    logger.info("🌿 分支: %s", branch_name)
+        new_content = analyze_and_plan(target_path, file_path)
 
-    result = auto_refactor_with_retry(target_path, selected_files)
+        if new_content.startswith("LLM") or new_content.startswith("读取") or new_content.startswith("语法"):
+            logger.error("分析失败: %s", new_content)
+            continue
 
-    print_summary(result, branch_name)
+        if len(new_content) < 50:
+            logger.error("返回内容过短，可能是错误")
+            continue
 
-    if result["success"]:
-        logger.info("✅ 全部通过")
-    else:
-        logger.warning("⚠️ 有失败，请检查后合并")
+        refactored_path = save_refactored_code(file_path, new_content)
+        logger.info("✅ 已保存到: %s", refactored_path)
+
+        results.append({
+            "original": file_path,
+            "refactored": refactored_path,
+            "rel_path": rel_path,
+        })
+
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("📊 重构完成")
+    logger.info("=" * 60)
+
+    if results:
+        logger.info("改动文件:")
+        for r in results:
+            logger.info("  %s -> %s", r["rel_path"], r["refactored"].name)
+
+    logger.info("")
+    logger.info("💡 手动合并命令:")
+    for r in results:
+        logger.info("  cp %s %s", r["refactored"].name, r["rel_path"])
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":
