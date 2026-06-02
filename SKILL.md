@@ -15,14 +15,14 @@ description: Use when user says "ms refactor" | "ms refactor <path>"
 
 ## 技能说明
 
-ms refactor 是 Python 代码重构工具。
+ms refactor 是 Python 代码自动重构工具。
 
-**交互流程：**
-1. 列出目标下所有 .py 文件（带序号和行数）
-2. 你选择要分析的文件
-3. LLM 分析代码，输出重构建议（diff 格式）
-4. 你确认：y=应用，n=跳过，s=跳过该文件
-5. 继续选下一个文件（输入 q 退出）
+**自动流程：**
+1. 列出 .py 文件，支持多选（1,3,5 或 1-3 或 all）
+2. 新建分支 refactor/<timestamp>
+3. 自动分析并应用选定文件的重构
+4. 破坏性分析（语法 + 测试，最多 5 轮重试）
+5. 输出变更摘要，用户自行合并
 
 **支持语言：** Python only（.py 文件）
 
