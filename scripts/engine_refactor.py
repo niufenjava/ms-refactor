@@ -73,8 +73,8 @@ def is_binary(path: Path) -> bool:
         return True
 
 
-def parse_python_structure(content: str, filepath: str) -> list[dict]:
-    """用 ast 解析 Python 代码结构。"""
+def extract_python_symbols(content: str, filepath: str) -> list[dict]:
+    """用 ast 解析 Python 代码结构，返回函数和类列表。"""
     items = []
     try:
         tree = ast.parse(content, filename=filepath)
@@ -144,7 +144,7 @@ def parse_diff_blocks(markdown: str) -> list[dict]:
     return blocks
 
 
-def apply_diff_to_file(filepath: Path, old_content: str, new_content: str) -> tuple[bool, str]:
+def apply_code_change(filepath: Path, old_content: str, new_content: str) -> tuple[bool, str]:
     """将 old_content 替换为 new_content，精确到行。返回 (success, message)。"""
     try:
         actual = filepath.read_text(encoding="utf-8", errors="replace")
@@ -164,7 +164,7 @@ def apply_diff_to_file(filepath: Path, old_content: str, new_content: str) -> tu
     return True, "已应用改动"
 
 
-def apply_plan(path: Path, plan: str) -> tuple[int, int, list[str]]:
+def execute_plan(target: Path, plan: str) -> tuple[int, int, list[str]]:
     """应用 diff 计划。返回 (成功数, 失败数, 错误消息列表)。"""
     blocks = parse_diff_blocks(plan)
     success = 0
@@ -172,8 +172,8 @@ def apply_plan(path: Path, plan: str) -> tuple[int, int, list[str]]:
     errors = []
 
     for block in blocks:
-        filepath = path / block["file"] if not Path(block["file"]).is_absolute() else Path(block["file"])
-        ok, msg = apply_diff_to_file(filepath, block["old"], block["new"])
+        filepath = target / block["file"] if not Path(block["file"]).is_absolute() else Path(block["file"])
+        ok, msg = apply_code_change(filepath, block["old"], block["new"])
         if ok:
             success += 1
         else:
@@ -183,148 +183,200 @@ def apply_plan(path: Path, plan: str) -> tuple[int, int, list[str]]:
     return success, failures, errors
 
 
-def create_branch(base_branch: str = "main") -> tuple[bool, str]:
-    """创建新分支用于重构。返回 (success, branch_name or error)。"""
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    branch_name = f"refactor/{timestamp}"
+def find_python_files(target: Path) -> list[Path]:
+    """找出目标目录下所有的 .py 文件，排除缓存目录。"""
+    if target.is_file():
+        return [target] if target.suffix == ".py" else []
 
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return True, branch_name
-
-    result = subprocess.run(
-        ["git", "checkout", "-b", branch_name],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return False, f"创建分支失败: {result.stderr}"
-    return True, branch_name
-
-
-def main():
-    parser = argparse.ArgumentParser(description="代码风格重构引擎")
-    parser.add_argument("command", choices=["analyze", "apply", "exec", "auto"])
-    parser.add_argument("target", nargs="?", default="", help="目标：文件路径/目录/项目名")
-    parser.add_argument("--plan", default="", help="（apply 模式）diff 计划文件路径")
-    args = parser.parse_args()
-
-    if not args.target and args.command != "apply":
-        print("⚠️ 请提供目标路径或项目名", file=sys.stderr)
-        print("用法：ms refactor <path|name>", file=sys.stderr)
-        sys.exit(1)
-
-    if args.command == "apply":
-        if not args.plan:
-            print("⚠️ apply 模式需要 --plan 参数指定 diff 计划文件", file=sys.stderr)
-            sys.exit(1)
-        try:
-            plan_content = Path(args.plan).read_text(encoding="utf-8")
-        except Exception as e:
-            print(f"⚠️ 读取 diff 计划失败: {e}", file=sys.stderr)
-            sys.exit(1)
-        target_path = Path.cwd()
-        success, failures, errors = apply_plan(target_path, plan_content)
-        print(f"\n✅ 成功: {success}, ❌ 失败: {failures}")
-        for err in errors:
-            print(f"  - {err}")
-        sys.exit(0)
-
-    try:
-        target_path = resolve_target(args.target)
-    except FileNotFoundError as e:
-        print(f"⚠️ {e}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"📂 目标：{target_path}", file=sys.stderr)
-    print(f"🔍 语言：Python（固定）", file=sys.stderr)
-
-    print(f"⏳ 分析中…", file=sys.stderr)
-
-    code_files = []
-    for f in target_path.rglob("*.py") if target_path.is_dir() else [target_path]:
-        if f.is_file() and not is_binary(f):
-            code_files.append(f)
-
-    if not code_files:
-        print("⚠️ 未找到 Python 代码文件", file=sys.stderr)
-        sys.exit(1)
-
-    structure = {}
-    for f in code_files[:20]:
-        try:
-            content = f.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+    files = []
+    for item in target.rglob("*.py"):
+        if any(skip in item.parts for skip in SKIP_DIRS):
             continue
-        lines = content.split("\n")
-        items = parse_python_structure(content, str(f))
-        items_text = ""
-        for item in items[:50]:
-            if item["type"] == "error":
-                items_text += f"  ⚠️ {item['name']}\n"
-            else:
-                items_text += f"  [L{item['line']}] {item['type']} {item['name']}\n"
+        if is_binary(item):
+            continue
+        files.append(item)
 
-        structure[str(f)] = {
-            "lines": len(lines),
-            "items": items,
-            "items_text": items_text,
-            "preview": "\n".join(lines) if lines else "",
-        }
+    return sorted(files)
 
-    files_text = ""
-    for fpath, info in list(structure.items())[:12]:
+
+def list_python_files(target: Path) -> list[Path]:
+    """列出目标下所有 .py 文件，返回用户选择的文件路径。
+
+    返回空列表表示用户退出。
+    """
+    files = find_python_files(target)
+    if not files:
+        logger.warning("未找到 Python 文件")
+        return []
+
+    logger.info("📋 找到 %d 个 Python 文件：\n", len(files))
+    for idx, f in enumerate(files, 1):
         try:
-            rel = fpath[str(target_path)].lstrip("/") if str(target_path) in fpath else fpath
+            lines = len(f.read_text(errors="ignore").splitlines())
         except Exception:
-            rel = fpath
-        files_text += f"\n### {rel}（{info['lines']} 行）\n"
-        if info["items_text"]:
-            files_text += f"符号：\n{info['items_text']}"
-        files_text += f"\n```\n{info['preview'][:10000]}\n```\n"
+            lines = 0
+        rel_path = f.relative_to(target) if target.is_dir() else f.name
+        logger.info("  [%d] %s (%d 行)", idx, rel_path, lines)
 
-    user_content = f"""## 目标
-- 路径：{target_path}
-- 语言：Python
-- 注释：# / 文档："""
-    user_content += f"""
-- 文件数：{len(code_files)}（展示前 {len(structure)} 个）
+    while True:
+        choice = input("\n选择文件（q 退出）: ").strip()
+        if choice.lower() == "q":
+            return []
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(files):
+                return [files[idx - 1]]
+        except ValueError:
+            pass
+        logger.warning("无效输入，请输入 1-%d 或 q", len(files))
 
-{files_text}
+
+def compose_llm_prompt(target: Path, file_path: Path) -> str:
+    """构建发送给 LLM 的分析 prompt。"""
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return f"读取文件失败: {e}"
+
+    symbols = extract_python_symbols(content, str(file_path))
+
+    symbols_text = ""
+    for s in symbols[:50]:
+        if s["type"] == "error":
+            symbols_text += f"  ⚠️ {s['name']}\n"
+        else:
+            symbols_text += f"  [L{s['line']}] {s['type']} {s['name']}\n"
+
+    rel_path = file_path.relative_to(target) if target.is_dir() else file_path.name
+
+    return f"""## 目标文件
+{rel_path}
+
+## 代码结构
+{symbols_text if symbols_text else "（无）"}
+
+## 代码内容
+```
+{content[:10000]}
+```
 """
+
+
+def analyze_and_plan(target: Path, file_path: Path) -> str:
+    """调用 LLM 生成单个文件的重构计划。"""
+    user_content = compose_llm_prompt(target, file_path)
 
     try:
         sys.path.insert(0, str(LLM_CALL_PY.parent))
         from llm_call import read_prompt, safe_llm_call
     except Exception as e:
-        print(f"⚠️ LLM 调用失败：{e}", file=sys.stderr)
-        sys.exit(1)
+        return f"LLM 调用失败: {e}"
 
     try:
         system_prompt = read_prompt(str(PROMPT_FILE))
     except Exception as e:
-        print(f"⚠️ 读取 prompt 文件失败：{e}", file=sys.stderr)
-        sys.exit(1)
+        return f"读取 prompt 文件失败: {e}"
 
     ok, result = safe_llm_call(system_prompt, user_content)
-    plan = result if ok else f"⚠️ LLM 分析失败：{result}"
+    if ok:
+        return result
+    return f"LLM 分析失败: {result}"
 
-    print("\n" + "=" * 60)
-    print("📋 代码重构计划")
-    print("=" * 60)
-    print(plan)
-    print("=" * 60)
 
-    if args.command == "analyze":
-        print("\n💡 预览完成。使用 exec 模式将进入确认后执行流程。")
-        print("   或保存以上内容，配合 apply --plan <file> 手动执行。")
-    elif args.command == "exec":
-        print("\n✅ 分析完成。确认后执行全部改动。")
-        print("💡 回复「确认」执行全部改动，或指定具体文件只改部分。")
+def run_destruction_check(target: Path) -> dict:
+    """语法检查 + 测试运行。返回 {passed: bool, details: list[str]}。"""
+    details = []
+    passed = True
+
+    files = find_python_files(target)
+    for f in files:
+        result = subprocess.run(
+            ["python3", "-m", "py_compile", str(f)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            passed = False
+            details.append(f"语法错误: {f.relative_to(target)} - {result.stderr.strip()}")
+        else:
+            details.append(f"✅ 语法OK: {f.relative_to(target)}")
+
+    test_dir = target / "tests"
+    if test_dir.exists():
+        pytest_result = subprocess.run(
+            ["python3", "-m", "pytest", str(test_dir), "-v", "--tb=short"],
+            capture_output=True, text=True, cwd=str(target),
+        )
+        if pytest_result.returncode == 0:
+            details.append(f"✅ 测试通过")
+        elif pytest_result.returncode == 5:
+            details.append("⚠️ 无测试文件")
+        else:
+            passed = False
+            details.append(f"❌ 测试失败")
+
+    return {"passed": passed, "details": details}
+
+
+def interactive_refactor(target: Path) -> None:
+    """交互式重构流程：列出文件 -> 选择 -> 分析 -> 确认应用。"""
+    while True:
+        files = list_python_files(target)
+        if not files:
+            return
+
+        file_path = files[0]
+        rel_path = file_path.relative_to(target) if target.is_dir() else file_path.name
+
+        logger.info("\n📄 分析: %s", rel_path)
+        plan = analyze_and_plan(target, file_path)
+
+        if plan.startswith("LLM") or plan.startswith("读取"):
+            logger.error(plan)
+            continue
+
+        logger.info("\n=== 重构建议 ===\n%s\n", plan)
+
+        while True:
+            confirm = input("确认应用？[y/n/s(kip)]: ").strip().lower()
+            if confirm in ("y", "n", "s"):
+                break
+            logger.warning("无效输入")
+
+        if confirm == "y":
+            success, failures, errors = execute_plan(target, plan)
+            logger.info("应用结果: 成功 %d, 失败 %d", success, failures)
+            for err in errors:
+                logger.error("  - %s", err)
+        elif confirm == "s":
+            logger.info("跳过该文件")
+
+        if confirm != "n":
+            check = input("是否进行语法检查？[y/n]: ").strip().lower()
+            if check == "y":
+                result = run_destruction_check(target)
+                for d in result["details"]:
+                    logger.info(d)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Python 代码重构引擎")
+    parser.add_argument("target", nargs="?", default="", help="目标：文件路径/目录/项目名")
+    args = parser.parse_args()
+
+    if not args.target:
+        logger.error("请提供目标路径或项目名")
+        logger.info("用法: python3 engine_refactor.py <目标>")
+        sys.exit(1)
+
+    try:
+        target_path = resolve_target(args.target)
+    except FileNotFoundError as e:
+        logger.error(e)
+        sys.exit(1)
+
+    logger.info("📂 目标: %s", target_path)
+    interactive_refactor(target_path)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
