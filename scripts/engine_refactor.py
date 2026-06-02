@@ -199,6 +199,48 @@ def find_python_files(target: Path) -> list[Path]:
     return sorted(files)
 
 
+def parse_selection(selection: str, file_count: int) -> list[int]:
+    """解析用户输入的选择，返回文件索引列表（0-based）。
+
+    支持格式：
+    - "1,3,5" -> [0, 2, 4]
+    - "1-3" -> [0, 1, 2]
+    - "all" -> [0, 1, ..., file_count-1]
+    - "q" -> []
+    """
+    selection = selection.strip().lower()
+    if selection == "q":
+        return []
+    if selection == "all":
+        return list(range(file_count))
+
+    indices = []
+    # 逗号分隔
+    for part in selection.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        # 范围 (如 1-3)
+        if "-" in part:
+            start, end = part.split("-", 1)
+            try:
+                start_idx = int(start.strip()) - 1
+                end_idx = int(end.strip())
+                indices.extend(range(start_idx, end_idx))
+            except ValueError:
+                pass
+        else:
+            # 单个数字
+            try:
+                idx = int(part) - 1
+                if 0 <= idx < file_count:
+                    indices.append(idx)
+            except ValueError:
+                pass
+
+    return sorted(set(indices))
+
+
 def list_python_files(target: Path) -> list[Path]:
     """列出目标下所有 .py 文件，返回用户选择的文件路径。
 
