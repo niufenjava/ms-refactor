@@ -19,3 +19,4 @@ Thumbs.db
 
 # Backup
 .backup/
+__pycache__/
