@@ -166,6 +166,7 @@ def detect_language(path: Path) -> tuple[str, str]:
 
 
 def get_lang_config(lang: str) -> dict:
+    """根据语言名返回配置字典，包含默认值保护。"""
     defaults = {
         "comment": "//",
         "docstring": "//",
@@ -218,37 +219,38 @@ def parse_python_structure(content: str, filepath: str) -> list[dict]:
     return items
 
 
+_REGEX_PATTERNS = {
+    "JavaScript": [
+        (r'(?:async\s+)?function\s+(\w+)', 'function'),
+        (r'(?:const|let|var)\s+(\w+)\s*=', 'const'),
+        (r'class\s+(\w+)', 'class'),
+    ],
+    "TypeScript": [
+        (r'(?:async\s+)?function\s+(\w+)', 'function'),
+        (r'(?:const|let|var)\s+(\w+)\s*[=:](?:(?!\breturn\b)[^;])+;', 'const'),
+        (r'class\s+(\w+)', 'class'),
+        (r'(?:interface|type)\s+(\w+)', 'type'),
+    ],
+    "Go": [
+        (r'func\s+(\w+)', 'function'),
+        (r'type\s+(\w+)\s+struct', 'struct'),
+        (r'type\s+(\w+)\s+interface', 'interface'),
+    ],
+    "Rust": [
+        (r'fn\s+(\w+)', 'function'),
+        (r'struct\s+(\w+)', 'struct'),
+        (r'impl\s+(?:<[^>]+>\s+)?(\w+)', 'impl'),
+    ],
+    "Shell": [
+        (r'(?:function\s+)?(\w+)\s*\(\)', 'function'),
+        (r'(\w+)\s*\(\)\s*\{', 'function'),
+    ],
+}
+
 def parse_regex_structure(content: str, lang: str) -> list[dict]:
     """用正则解析 JS/TS/Go/Rust/Shell 代码结构。"""
     items = []
-    patterns = {
-        "JavaScript": [
-            (r'(?:async\s+)?function\s+(\w+)', 'function'),
-            (r'(?:const|let|var)\s+(\w+)\s*=', 'const'),
-            (r'class\s+(\w+)', 'class'),
-        ],
-        "TypeScript": [
-            (r'(?:async\s+)?function\s+(\w+)', 'function'),
-            (r'(?:const|let|var)\s+(\w+)\s*[=:](?:(?!\breturn\b)[^;])+;', 'const'),
-            (r'class\s+(\w+)', 'class'),
-            (r'(?:interface|type)\s+(\w+)', 'type'),
-        ],
-        "Go": [
-            (r'func\s+(\w+)', 'function'),
-            (r'type\s+(\w+)\s+struct', 'struct'),
-            (r'type\s+(\w+)\s+interface', 'interface'),
-        ],
-        "Rust": [
-            (r'fn\s+(\w+)', 'function'),
-            (r'struct\s+(\w+)', 'struct'),
-            (r'impl\s+(?:<[^>]+>\s+)?(\w+)', 'impl'),
-        ],
-        "Shell": [
-            (r'(?:function\s+)?(\w+)\s*\(\)', 'function'),
-            (r'(\w+)\s*\(\)\s*\{', 'function'),
-        ],
-    }
-    lang_patterns = patterns.get(lang, [])
+    lang_patterns = _REGEX_PATTERNS.get(lang, [])
 
     for pattern, kind in lang_patterns:
         for m in re.finditer(pattern, content):
@@ -292,7 +294,7 @@ def scan_structure(path: Path, lang: str) -> dict:
             "lines": len(lines),
             "items": items,
             "items_text": items_text,
-            "preview": "\n".join(lines[:30]) if lines else "",
+            "preview": "\n".join(lines) if lines else "",
         }
 
     return {"total_files": len(code_files), "files": structure}
@@ -315,7 +317,7 @@ def build_user_content(path: Path, lang: str, structure: dict) -> str:
         files_text += f"\n### {rel}（{info['lines']} 行）\n"
         if info["items_text"]:
             files_text += f"符号：\n{info['items_text']}"
-        files_text += f"\n```\n{info['preview'][:600]}\n```\n"
+        files_text += f"\n```\n{info['preview'][:10000]}\n```\n"
 
     return f"""## 目标
 - 路径：{path}
