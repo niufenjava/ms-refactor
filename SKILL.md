@@ -9,27 +9,25 @@ description: Use when user says "ms refactor" | "ms refactor <path>"
 
 | 用户输入 | 触发动作 |
 | -------------------- | ------------------------------------------------ |
-| `ms refactor` | 返回技能列表 |
-| `ms refactor <目标>` | `python3 ~/my-skills/my-refactor/scripts/engine_refactor.py analyze "<目标>"` |
-| `ms refactor <目标> exec` | `python3 ~/my-skills/my-refactor/scripts/engine_refactor.py exec "<目标>"` |
-| `ms refactor <目标> auto` | 新建分支 → 自动重构 → 破坏性分析 → 问你怎么样 |
+| `ms refactor <目标>` | `python3 ~/my-skills/my-refactor/scripts/engine_refactor.py "<目标>"` |
 
 ---
 
-## 技能列表
-ms refactor 技能列表:
-  ms refactor <目标>          | 分析代码，生成 diff 清单（不执行）
-  ms refactor <目标> exec    | 分析 + 确认后执行改动
-  ms refactor <目标> auto    | 自动重构 + 破坏性分析，询问你确认后合并
+## 技能说明
 
-## 支持语言
-Python、JavaScript/JSX、TypeScript/TSX、Go、Rust、Shell
+ms refactor 是 Python 代码重构工具。
 
-## auto 模式流程
-1. 新建分支 `refactor/YYYYMMDD-HHMMSS`
-2. 扫描代码结构
-3. LLM 生成改动计划
-4. **自动应用所有改动**（不逐个确认）
-5. 破坏性分析（语法检查 + 运行测试）
-6. 展示结果，请你去代码里看看
-7. 你确认没问题后，手动合并到原分支
+**交互流程：**
+1. 列出目标下所有 .py 文件（带序号和行数）
+2. 你选择要分析的文件
+3. LLM 分析代码，输出重构建议（diff 格式）
+4. 你确认：y=应用，n=跳过，s=跳过该文件
+5. 继续选下一个文件（输入 q 退出）
+
+**支持语言：** Python only（.py 文件）
+
+## 示例
+
+```
+ms refactor ~/my-projects/ms-gh
+```
