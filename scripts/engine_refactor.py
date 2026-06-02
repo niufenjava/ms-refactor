@@ -25,6 +25,7 @@ LLM_CALL_PY = Path.home() / "my-projects" / "claw-scripts" / "llm" / "llm_call.p
 MY_PROJECTS = Path.home() / "my-projects"
 
 PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "re_python.md"
+REFACTOR_PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "refactor_prompt.md"
 
 
 def resolve_target(raw: str) -> Path:
@@ -294,7 +295,7 @@ def llm_fix_and_regenerate(target: Path, selected_files: list[Path], error_summa
             continue
 
         try:
-            system_prompt = read_prompt(str(PROMPT_FILE))
+            system_prompt = read_prompt(str(REFACTOR_PROMPT_FILE))
         except Exception:
             continue
 
@@ -504,15 +505,15 @@ def analyze_and_plan(target: Path, file_path: Path) -> str:
     except Exception as e:
         return f"LLM 调用失败: {e}"
 
-    try:
-        system_prompt = read_prompt(str(PROMPT_FILE))
-    except Exception as e:
-        return f"读取 prompt 文件失败: {e}"
+        try:
+            system_prompt = read_prompt(str(REFACTOR_PROMPT_FILE))
+        except Exception as e:
+            return f"读取 prompt 文件失败: {e}"
 
-    ok, result = safe_llm_call(system_prompt, user_content)
-    if ok:
-        return result
-    return f"LLM 分析失败: {result}"
+        ok, result = safe_llm_call(system_prompt, user_content)
+        if ok:
+            return result
+        return f"LLM 分析失败: {result}"
 
 
 def ask_llm_generate_tests(target: Path) -> bool:
