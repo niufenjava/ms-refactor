@@ -222,7 +222,12 @@ def execute_plan(target: Path, plan: str) -> tuple[int, int, list[str]]:
     errors = []
 
     for block in blocks:
-        filepath = target / block["file"] if not Path(block["file"]).is_absolute() else Path(block["file"])
+        if Path(block["file"]).is_absolute():
+            filepath = Path(block["file"])
+        elif target.is_file():
+            filepath = target.parent / block["file"]
+        else:
+            filepath = target / block["file"]
         ok, msg = apply_code_change(filepath, block["old"], block["new"])
         if ok:
             success += 1
