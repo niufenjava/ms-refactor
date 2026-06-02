@@ -204,6 +204,126 @@ def execute_plan(target: Path, plan: str) -> tuple[int, int, list[str]]:
     return success, failures, errors
 
 
+def auto_refactor(target: Path, selected_files: list[Path]) -> dict:
+    """自动分析并应用所有选定文件的重构。"""
+    results = {
+        "files_processed": 0,
+        "changes_applied": 0,
+        "plans": {},
+        "errors": [],
+    }
+
+    for file_path in selected_files:
+        plan = analyze_and_plan(target, file_path)
+        if plan.startswith("LLM") or plan.startswith("读取"):
+            results["errors"].append(f"{file_path}: {plan}")
+            continue
+
+        results["plans"][str(file_path)] = plan
+        success, failures, errors = execute_plan(target, plan)
+        results["files_processed"] += 1
+        results["changes_applied"] += success
+        results["errors"].extend(errors)
+
+    return results
+
+
+def llm_fix_and_regenerate(target: Path, selected_files: list[Path], error_summary: str) -> dict:
+    """根据错误信息让 LLM 修复并重新生成 diff。"""
+    plans = {}
+
+    for file_path in selected_files:
+        rel_path = file_path.relative_to(target) if target.is_dir() else file_path.name
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            continue
+
+        prompt = f"""文件: {rel_path}
+内容:
+```
+{content[:8000]}
+```
+
+上次重构有错误：
+{error_summary}
+
+请根据错误信息修复这个文件，生成新的重构 diff。
+输出格式：
+### File: <相对路径>
+
+```diff
+- 原代码
++ 改动后代码
+```
+"""
+
+        try:
+            sys.path.insert(0, str(LLM_CALL_PY.parent))
+            from llm_call import read_prompt, safe_llm_call
+        except Exception:
+            continue
+
+        try:
+            system_prompt = read_prompt(str(PROMPT_FILE))
+        except Exception:
+            continue
+
+        ok, result = safe_llm_call(system_prompt, prompt)
+        if ok:
+            plans[str(file_path)] = result
+
+    return plans
+
+
+MAX_RETRIES = 5
+
+def auto_refactor_with_retry(target: Path, selected_files: list[Path]) -> dict:
+    """自动重构 + 5 轮重试。返回最终结果。"""
+    all_plans = {}
+
+    for round_num in range(1, MAX_RETRIES + 1):
+        logger.info(f"⏳ 第 {round_num} 轮: 分析中...")
+
+        if round_num == 1:
+            results = auto_refactor(target, selected_files)
+            all_plans.update(results["plans"])
+        else:
+            check = run_destruction_check(target)
+            if check["passed"]:
+                logger.info(f"✅ 第 {round_num} 轮: 全部通过")
+                break
+
+            error_summary = "\n".join(check["details"])
+            logger.warning(f"❌ 第 {round_num} 轮: 失败，LLM 修复中...")
+
+            new_plans = llm_fix_and_regenerate(target, selected_files, error_summary)
+
+            for file_path, plan in new_plans.items():
+                fp = Path(file_path)
+                success, failures, errors = execute_plan(target, plan)
+                all_plans[file_path] = plan
+
+        check = run_destruction_check(target)
+        if check["passed"]:
+            logger.info(f"✅ 第 {round_num} 轮: 全部通过")
+            return {
+                "success": True,
+                "rounds": round_num,
+                "plans": all_plans,
+                "results": results,
+            }
+
+    logger.error(f"⚠️ {MAX_RETRIES} 轮重试后仍失败，分支已创建，请手动检查")
+    return {
+        "success": False,
+        "rounds": MAX_RETRIES,
+        "plans": all_plans,
+        "results": results,
+    }
+
+
 def find_python_files(target: Path) -> list[Path]:
     """找出目标目录下所有的 .py 文件，排除缓存目录。"""
     if target.is_file():
